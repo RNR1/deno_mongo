@@ -1,5 +1,5 @@
 import { WireProtocol } from "./protocol.ts";
-import { ConnectOptions, Document } from "../types.ts";
+import { Document } from "../../deps.ts";
 
 export const driverMetadata = {
   driver: {
@@ -15,6 +15,7 @@ export const driverMetadata = {
 
 export interface HandshakeDocument extends Document {
   ismaster: boolean;
+  // deno-lint-ignore no-explicit-any
   client: any;
   compression: string[];
   saslSupportedMechs?: string;

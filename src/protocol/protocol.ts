@@ -1,6 +1,15 @@
-import { assert, BufReader, Deferred, deferred } from "../../deps.ts";
-import { MongoError, MongoErrorInfo } from "../error.ts";
-import { Document } from "../types.ts";
+import {
+  BufReader,
+  Deferred,
+  deferred,
+  Document,
+  writeAll,
+} from "../../deps.ts";
+import {
+  MongoDriverError,
+  MongoErrorInfo,
+  MongoServerError,
+} from "../error.ts";
 import { handshake } from "./handshake.ts";
 import { parseHeader } from "./header.ts";
 import { deserializeMessage, Message, serializeMessage } from "./message.ts";
@@ -22,23 +31,22 @@ export class WireProtocol {
   #reader: BufReader;
   #commandQueue: CommandTask[] = [];
 
-  #connectionId: number = 0;
-
   constructor(socket: Socket) {
     this.#socket = socket;
     this.#reader = new BufReader(this.#socket);
   }
 
   async connect() {
-    const { connectionId } = await handshake(this);
-    this.#connectionId = connectionId;
+    const { connectionId: _connectionId } = await handshake(this);
   }
 
-  async commandSingle<T = Document>(db: string, body: Document): Promise<T> {
-    const [doc] = await this.command<MongoErrorInfo | T>(db, body);
-    const maybeError = doc as MongoErrorInfo;
-    if (maybeError.ok === 0) {
-      throw new MongoError(maybeError);
+  async commandSingle<T = Document>(
+    db: string,
+    body: Document,
+  ): Promise<T> {
+    const [doc] = await this.command(db, body);
+    if (doc.ok === 0) {
+      throw new MongoServerError(doc as MongoErrorInfo);
     }
     return doc as T;
   }
@@ -54,19 +62,20 @@ export class WireProtocol {
     this.#commandQueue.push(commandTask);
     this.send();
 
-    this.#pendingResponses.set(requestId, deferred());
+    const pendingMessage = deferred<Message>();
+    this.#pendingResponses.set(requestId, pendingMessage);
     this.receive();
-    const message = await this.#pendingResponses.get(requestId);
+    const message = await pendingMessage;
 
     let documents: T[] = [];
 
-    message?.sections.forEach((section) => {
+    for (const section of message?.sections!) {
       if ("document" in section) {
         documents.push(section.document as T);
       } else {
         documents = documents.concat(section.documents as T[]);
       }
-    });
+    }
 
     return documents;
   }
@@ -76,7 +85,7 @@ export class WireProtocol {
     this.#isPendingRequest = true;
     while (this.#commandQueue.length > 0) {
       const task = this.#commandQueue.shift()!;
-      const chunks = serializeMessage({
+      const buffer = serializeMessage({
         requestId: task.requestId,
         responseTo: 0,
         sections: [
@@ -89,9 +98,7 @@ export class WireProtocol {
         ],
       });
 
-      for (const chunk of chunks) {
-        await Deno.writeAll(this.#socket, chunk);
-      }
+      await writeAll(this.#socket, buffer);
     }
     this.#isPendingRequest = false;
   }
@@ -101,13 +108,13 @@ export class WireProtocol {
     this.#isPendingResponse = true;
     while (this.#pendingResponses.size > 0) {
       const headerBuffer = await this.#reader.readFull(new Uint8Array(16));
-      assert(headerBuffer);
-      const header = parseHeader(headerBuffer!);
+      if (!headerBuffer) throw new MongoDriverError("Invalid response header");
+      const header = parseHeader(headerBuffer);
       const bodyBuffer = await this.#reader.readFull(
         new Uint8Array(header.messageLength - 16),
       );
-      assert(bodyBuffer);
-      const reply = deserializeMessage(header, bodyBuffer!);
+      if (!bodyBuffer) throw new MongoDriverError("Invalid response body");
+      const reply = deserializeMessage(header, bodyBuffer);
       const pendingMessage = this.#pendingResponses.get(header.responseTo);
       this.#pendingResponses.delete(header.responseTo);
       pendingMessage?.resolve(reply);

@@ -1,5 +1,6 @@
+import { Document } from "../../../deps.ts";
 import { CommandCursor, WireProtocol } from "../../protocol/mod.ts";
-import { Document, FindOptions } from "../../types.ts";
+import { FindOptions } from "../../types.ts";
 
 interface FindCursorContext {
   dbName: string;
@@ -18,7 +19,7 @@ export class FindCursor<T> extends CommandCursor<T> {
       find: collectionName,
       filter,
       batchSize: 1,
-      noCursorTimeout: true,
+      noCursorTimeout: false,
       ...options,
     });
     return {
@@ -29,7 +30,12 @@ export class FindCursor<T> extends CommandCursor<T> {
 
   constructor(context: FindCursorContext) {
     super(context.protocol, () => this.executor());
-    this.#context = context;
+    this.#context = {
+      ...context,
+      options: {
+        ...context.options,
+      },
+    };
   }
 
   limit(limit: number): this {

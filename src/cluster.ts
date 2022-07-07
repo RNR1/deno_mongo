@@ -1,15 +1,8 @@
 import { WireProtocol } from "./protocol/mod.ts";
 import { ConnectOptions } from "./types.ts";
 import { AuthContext, ScramAuthPlugin, X509AuthPlugin } from "./auth/mod.ts";
-import { MongoError } from "./error.ts";
-import { assert } from "../deps.ts";
+import { MongoDriverError } from "./error.ts";
 import { Server } from "./types.ts";
-
-export interface DenoConnectOptions {
-  hostname: string;
-  port: number;
-  certFile?: string;
-}
 
 export class Cluster {
   #options: ConnectOptions;
@@ -31,29 +24,30 @@ export class Cluster {
     );
   }
 
-  async connectToServer(server: Server, options: ConnectOptions) {
-    const denoConnectOps: DenoConnectOptions = {
+  connectToServer(server: Server, options: ConnectOptions) {
+    const denoConnectOps: Deno.ConnectTlsOptions = {
       hostname: server.host,
       port: server.port,
     };
-    if (options.tls) {
-      if (options.certFile) {
-        denoConnectOps.certFile = options.certFile;
-      }
-      if (options.keyFile) {
-        if (options.keyFilePassword) {
-          throw new MongoError(
-            `Tls keyFilePassword not implemented in Deno driver`,
-          );
-          //TODO, need something like const key = decrypt(options.keyFile) ...
-        }
-        throw new MongoError(`Tls keyFile not implemented in Deno driver`);
-        //TODO, need Deno.connectTls with something like key or keyFile option.
-      }
-      return await Deno.connectTls(denoConnectOps);
-    } else {
-      return await Deno.connect(denoConnectOps);
+
+    if (!options.tls) return Deno.connect(denoConnectOps);
+
+    if (options.certFile) {
+      denoConnectOps.caCerts = [Deno.readTextFileSync(options.certFile)];
     }
+
+    if (options.keyFile) {
+      //TODO: need something like const key = decrypt(options.keyFile) ...
+      if (options.keyFilePassword) {
+        throw new MongoDriverError(
+          "Tls keyFilePassword not implemented in Deno driver",
+        );
+      }
+      throw new MongoDriverError("Tls keyFile not implemented in Deno driver");
+      //TODO: need Deno.connectTls with something like key or keyFile option.
+    }
+
+    return Deno.connectTls(denoConnectOps);
   }
 
   async authenticate() {
@@ -80,7 +74,7 @@ export class Cluster {
       } else if (mechanism === "MONGODB-X509") {
         authPlugin = new X509AuthPlugin();
       } else {
-        throw new MongoError(
+        throw new MongoDriverError(
           `Auth mechanism not implemented in Deno driver: ${mechanism}`,
         );
       }
@@ -118,18 +112,16 @@ export class Cluster {
   }
 
   get protocol() {
-    const protocol = this.getMaster().protocol;
-    assert(protocol);
-    return protocol;
+    return this.getMaster().protocol;
   }
 
   close() {
-    this.#connections.forEach((connection) => {
+    for (const conn of this.#connections) {
       try {
-        Deno.close(connection.rid);
+        conn.close();
       } catch (error) {
         console.error(`Error closing connection: ${error}`);
       }
-    });
+    }
   }
 }

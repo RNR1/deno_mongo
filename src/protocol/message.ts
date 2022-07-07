@@ -1,6 +1,5 @@
-import { MessageHeader, OpCode, serializeHeader } from "./header.ts";
-import { Document } from "../types.ts";
-import { deserializeBson, serializeBson } from "../utils/bson.ts";
+import { MessageHeader, OpCode, setHeader } from "./header.ts";
+import { deserialize, Document, serialize } from "../../deps.ts";
 
 type MessageFlags = number;
 
@@ -32,7 +31,7 @@ function serializeSections(
   let totalLen = 0;
   const buffers = sections.map((section) => {
     if ("document" in section) {
-      const document = serializeBson(section.document);
+      const document = serialize(section.document);
       const section0 = new Uint8Array(1 + document.byteLength);
       new DataView(section0.buffer).setUint8(0, 0);
       section0.set(document, 1);
@@ -41,8 +40,8 @@ function serializeSections(
     } else {
       const identifier = encoder.encode(section.identifier + "\0");
       let documentsLength = 0;
-      let docs = section.documents.map((doc) => {
-        const document = serializeBson(doc);
+      const docs = section.documents.map((doc) => {
+        const document = serialize(doc);
         documentsLength += document.byteLength;
         return document;
       });
@@ -68,27 +67,35 @@ function serializeSections(
   return { length: totalLen, sections: buffers };
 }
 
-export function serializeMessage(message: Message): Uint8Array[] {
-  const { length, sections } = serializeSections(message.sections);
-  const buffer = new Uint8Array(4 + length);
+export function serializeMessage(
+  message: Message,
+): Uint8Array {
+  const { length: sectionsLength, sections } = serializeSections(
+    message.sections,
+  );
 
+  const buffer = new Uint8Array(20 + sectionsLength); // 16 bytes header + 4 bytes flags + sections
   const view = new DataView(buffer.buffer);
-  view.setInt32(0, message.flags ?? 0, true);
 
-  let pos = 4;
-  sections.forEach((section) => {
-    buffer.set(section, pos);
-    pos += section.byteLength;
-  });
-
-  const header = serializeHeader({
-    messageLength: 16 + buffer.byteLength,
+  // set header
+  setHeader(view, {
+    messageLength: buffer.byteLength,
     responseTo: message.responseTo,
     requestId: message.requestId,
     opCode: OpCode.MSG,
   });
 
-  return [header, buffer];
+  // set flags
+  view.setInt32(16, message.flags ?? 0, true);
+
+  // set sections
+  let pos = 20;
+  for (const section of sections) {
+    buffer.set(section, pos);
+    pos += section.byteLength;
+  }
+
+  return buffer;
 }
 
 export function deserializeMessage(
@@ -106,13 +113,12 @@ export function deserializeMessage(
     pos++;
     if (kind === 0) {
       const docLen = view.getInt32(pos, true);
-      const document = deserializeBson(
+      const document = deserialize(
         new Uint8Array(view.buffer.slice(pos, pos + docLen)),
       );
       pos += docLen;
       sections.push({ document });
     } else if (kind === 1) {
-      console.log("kind1");
       const len = view.getInt32(pos, true);
       const sectionBody = new Uint8Array(
         view.buffer.slice(pos + 4, pos + len - 4),
@@ -142,7 +148,7 @@ function parseDocuments(buffer: Uint8Array): Document[] {
   const view = new DataView(buffer);
   while (pos < buffer.byteLength) {
     const docLen = view.getInt32(pos, true);
-    const doc = deserializeBson(buffer.slice(pos, pos + docLen));
+    const doc = deserialize(buffer.slice(pos, pos + docLen));
     docs.push(doc);
     pos += docLen;
   }

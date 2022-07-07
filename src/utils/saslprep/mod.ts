@@ -1,8 +1,9 @@
+// deno-lint-ignore-file camelcase
 //ORIGINAL PROJECT AND LICENSE IN: https://github.com/chiefbiiko/saslprep
 //ORIGINAL PROJECT AND LICENSE IN: https://github.com/chiefbiiko/sparse-bitfield
 //ORIGINAL PROJECT AND LICENSE IN: https://github.com/chiefbiiko/memory-pager
 import { Bitfield } from "./deps.ts";
-import { loadCodePoints } from "./loadCodePoints.ts";
+import { loadCodePoints } from "./load_code_points.ts";
 
 const {
   unassigned_code_points,
@@ -38,10 +39,12 @@ function getCodePoint(chr: string): number {
   return codePoint;
 }
 
+// deno-lint-ignore no-explicit-any
 function first(x: any): any {
   return x[0];
 }
 
+// deno-lint-ignore no-explicit-any
 function last(x: any): any {
   return x[x.length - 1];
 } /**
@@ -54,7 +57,7 @@ function toCodePoints(input: string): number[] {
   const codepoints = [];
   const size = input.length;
 
-  for (let i: number = 0; i < size; i += 1) {
+  for (let i = 0; i < size; i += 1) {
     const before: number = input.charCodeAt(i);
 
     if (before >= 0xd800 && before <= 0xdbff && size > i + 1) {

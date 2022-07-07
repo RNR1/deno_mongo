@@ -1,17 +1,11 @@
-import { ConnectOptions, Credential, Document } from "../types.ts";
-import { Binary } from "../../bson/mod.ts";
+import { Credential } from "../types.ts";
 import { saslprep } from "../utils/saslprep/mod.ts";
 import { AuthContext, AuthPlugin } from "./base.ts";
 import { HandshakeDocument } from "../protocol/handshake.ts";
-import { MongoError } from "../error.ts";
-import {
-  b64,
-  createHash,
-  HmacSha1,
-  HmacSha256,
-  pbkdf2Sync,
-} from "../../deps.ts";
+import { MongoDriverError } from "../error.ts";
+import { b64, Binary, crypto as stdCrypto, Document, hex } from "../../deps.ts";
 import { driverMetadata } from "../protocol/mod.ts";
+import { pbkdf2 } from "./pbkdf2.ts";
 
 type CryptoMethod = "sha1" | "sha256";
 
@@ -47,16 +41,16 @@ export class ScramAuthPlugin extends AuthPlugin {
     return request;
   }
 
-  async auth(authContext: AuthContext): Promise<Document> {
+  auth(authContext: AuthContext): Promise<Document> {
     const response = authContext.response;
     if (response && response.speculativeAuthenticate) {
-      return await continueScramConversation(
+      return continueScramConversation(
         this.cryptoMethod,
         response.speculativeAuthenticate,
         authContext,
       );
     }
-    return await executeScram(this.cryptoMethod, authContext);
+    return executeScram(this.cryptoMethod, authContext);
   }
 }
 export function cleanUsername(username: string) {
@@ -105,17 +99,19 @@ export async function executeScram(
 ) {
   const { protocol, credentials } = authContext;
   if (!credentials) {
-    throw new MongoError("AuthContext must provide credentials.");
+    throw new MongoDriverError("AuthContext must provide credentials.");
   }
   if (!authContext.nonce) {
-    throw new MongoError("AuthContext must contain a valid nonce property");
+    throw new MongoDriverError(
+      "AuthContext must contain a valid nonce property",
+    );
   }
   const nonce = authContext.nonce;
   const db = credentials.db!;
 
   const saslStartCmd = makeFirstMessage(cryptoMethod, credentials, nonce);
   const result = await protocol.commandSingle(db, saslStartCmd);
-  return await continueScramConversation(cryptoMethod, result, authContext);
+  return continueScramConversation(cryptoMethod, result, authContext);
 }
 
 export async function continueScramConversation(
@@ -126,10 +122,10 @@ export async function continueScramConversation(
   const protocol = authContext.protocol;
   const credentials = authContext.credentials;
   if (!credentials) {
-    throw new MongoError("AuthContext must provide credentials.");
+    throw new MongoDriverError("AuthContext must provide credentials.");
   }
   if (!authContext.nonce) {
-    throw new MongoError("Unable to continue SCRAM without valid nonce");
+    throw new MongoDriverError("Unable to continue SCRAM without valid nonce");
   }
   const nonce = authContext.nonce;
 
@@ -141,7 +137,7 @@ export async function continueScramConversation(
   if (cryptoMethod === "sha256") {
     processedPassword = saslprep(password);
   } else {
-    processedPassword = passwordDigest(username, password);
+    processedPassword = await passwordDigest(username, password);
   }
 
   const payload = fixPayload(dec.decode(response.payload.buffer));
@@ -149,7 +145,7 @@ export async function continueScramConversation(
 
   const iterations = parseInt(dict.i, 10);
   if (iterations && iterations < 4096) {
-    throw new MongoError(
+    throw new MongoDriverError(
       `Server returned an invalid iteration count ${iterations}`,
     );
   }
@@ -157,33 +153,32 @@ export async function continueScramConversation(
   const salt = dict.s;
   const rnonce = dict.r;
   if (rnonce.startsWith("nonce")) {
-    throw new MongoError(`Server returned an invalid nonce: ${rnonce}`);
+    throw new MongoDriverError(`Server returned an invalid nonce: ${rnonce}`);
   }
 
   // Set up start of proof
   const withoutProof = `c=biws,r=${rnonce}`;
-  const saltedPassword = HI(
+  const saltedPassword = await HI(
     processedPassword,
     b64.decode(salt),
     iterations,
     cryptoMethod,
   );
 
-  const clientKey = HMAC(cryptoMethod, saltedPassword, "Client Key");
-
-  const serverKey = HMAC(cryptoMethod, saltedPassword, "Server Key");
-  const storedKey = H(cryptoMethod, clientKey);
+  const clientKey = await HMAC(cryptoMethod, saltedPassword, "Client Key");
+  const serverKey = await HMAC(cryptoMethod, saltedPassword, "Server Key");
+  const storedKey = await H(cryptoMethod, clientKey);
   const authMessage = [
     dec.decode(clientFirstMessageBare(username, nonce)),
     payload,
     withoutProof,
   ].join(",");
 
-  const clientSignature = HMAC(cryptoMethod, storedKey, authMessage);
+  const clientSignature = await HMAC(cryptoMethod, storedKey, authMessage);
   const clientProof = `p=${xor(clientKey, clientSignature)}`;
   const clientFinal = [withoutProof, clientProof].join(",");
 
-  const serverSignature = HMAC(cryptoMethod, serverKey, authMessage);
+  const serverSignature = await HMAC(cryptoMethod, serverKey, authMessage);
 
   const saslContinueCmd = {
     saslContinue: 1,
@@ -196,8 +191,13 @@ export async function continueScramConversation(
   const parsedResponse = parsePayload(
     fixPayload2(dec.decode(result.payload.buffer)),
   );
-  if (!compareDigest(b64.decode(parsedResponse.v), serverSignature)) {
-    // throw new MongoError("Server returned an invalid signature");
+  if (
+    !compareDigest(
+      b64.decode(parsedResponse.v),
+      new Uint8Array(serverSignature),
+    )
+  ) {
+    // throw new MongoDriverError("Server returned an invalid signature");
   }
   if (result.done) {
     return result;
@@ -208,7 +208,7 @@ export async function continueScramConversation(
     payload: new Uint8Array(0),
   };
 
-  return await protocol.commandSingle(db, retrySaslContinueCmd);
+  return protocol.commandSingle(db, retrySaslContinueCmd);
 }
 
 //this is a hack to fix codification in payload (in being and end of payload exists a codification problem, needs investigation ...)
@@ -221,7 +221,7 @@ export function fixPayload(payload: string) {
 }
 //this is a second hack to fix codification in payload (in being and end of payload exists a codification problem, needs investigation ...)
 export function fixPayload2(payload: string) {
-  var temp = payload.split("v=");
+  let temp = payload.split("v=");
   temp.shift();
   payload = temp.join("v=");
   temp = payload.split("ok");
@@ -240,26 +240,34 @@ export function parsePayload(payload: string) {
   return dict;
 }
 
-export function passwordDigest(username: string, password: string) {
+export async function passwordDigest(
+  username: string,
+  password: string,
+): Promise<string> {
   if (typeof username !== "string") {
-    throw new MongoError("username must be a string");
+    throw new MongoDriverError("username must be a string");
   }
 
   if (typeof password !== "string") {
-    throw new MongoError("password must be a string");
+    throw new MongoDriverError("password must be a string");
   }
 
   if (password.length === 0) {
-    throw new MongoError("password cannot be empty");
+    throw new MongoDriverError("password cannot be empty");
   }
 
-  const md5 = createHash("md5");
-  md5.update(`${username}:mongo:${password}`);
-  return md5.toString(); //hex
+  const result = await stdCrypto.subtle.digest(
+    "MD5",
+    enc.encode(`${username}:mongo:${password}`),
+  );
+  return dec.decode(hex.encode(new Uint8Array(result)));
 }
 
 // XOR two buffers
-export function xor(a: Uint8Array, b: Uint8Array) {
+export function xor(_a: ArrayBuffer, _b: ArrayBuffer) {
+  const a = new Uint8Array(_a);
+  const b = new Uint8Array(_b);
+
   const length = Math.max(a.length, b.length);
   const res = new Uint8Array(length);
 
@@ -270,24 +278,40 @@ export function xor(a: Uint8Array, b: Uint8Array) {
   return b64.encode(res);
 }
 
-export function H(method: CryptoMethod, text: Uint8Array) {
-  return new Uint8Array(createHash(method).update(text).digest());
+export function H(method: CryptoMethod, text: BufferSource) {
+  return crypto.subtle.digest(
+    method === "sha256" ? "SHA-256" : "SHA-1",
+    text,
+  );
 }
 
-export function HMAC(
+export async function HMAC(
   method: CryptoMethod,
-  key: Uint8Array,
-  text: Uint8Array | string,
+  secret: ArrayBuffer,
+  text: string,
 ) {
-  if (method === "sha256") {
-    return new Uint8Array(new HmacSha256(key).update(text).digest());
-  } else {
-    return new Uint8Array(new HmacSha1(key).update(text).digest());
-  }
+  const key = await crypto.subtle.importKey(
+    "raw",
+    secret,
+    {
+      name: "HMAC",
+      hash: method === "sha256" ? "SHA-256" : "SHA-1",
+    },
+    false,
+    ["sign", "verify"],
+  );
+
+  const signature = await crypto.subtle.sign(
+    "HMAC",
+    key,
+    enc.encode(text),
+  );
+
+  return signature;
 }
 
 interface HICache {
-  [key: string]: Uint8Array;
+  [key: string]: ArrayBuffer;
 }
 
 let _hiCache: HICache = {};
@@ -302,12 +326,12 @@ const hiLengthMap = {
   sha1: 20,
 };
 
-export function HI(
+export async function HI(
   data: string,
   salt: Uint8Array,
   iterations: number,
   cryptoMethod: CryptoMethod,
-) {
+): Promise<ArrayBuffer> {
   // omit the work if already generated
   const key = [data, b64.encode(salt), iterations].join(
     "_",
@@ -317,7 +341,7 @@ export function HI(
   }
 
   // generate the salt
-  const saltedData = pbkdf2Sync(
+  const saltedData = await pbkdf2(
     data,
     salt,
     iterations,
@@ -332,7 +356,7 @@ export function HI(
 
   _hiCache[key] = saltedData;
   _hiCacheCount += 1;
-  return new Uint8Array(saltedData);
+  return saltedData;
 }
 
 export function compareDigest(lhs: Uint8Array, rhs: Uint8Array) {

@@ -1,14 +1,26 @@
 import { Database } from "./database.ts";
-import { ConnectOptions, Document, ListDatabaseInfo } from "./types.ts";
+import { BuildInfo, ConnectOptions, ListDatabaseInfo } from "./types.ts";
 import { parse } from "./utils/uri.ts";
-import { MongoError } from "./error.ts";
+import { MongoDriverError } from "./error.ts";
 import { Cluster } from "./cluster.ts";
-import { assert } from "../deps.ts";
-
-const DENO_DRIVER_VERSION = "0.0.1";
+import { Document } from "../deps.ts";
 
 export class MongoClient {
   #cluster?: Cluster;
+  #defaultDbName = "admin";
+  #buildInfo?: BuildInfo;
+
+  get buildInfo() {
+    return this.#buildInfo;
+  }
+
+  getCluster() {
+    if (!this.#cluster) {
+      throw new MongoDriverError("MongoClient is no connected to the Database");
+    }
+
+    return this.#cluster;
+  }
 
   async connect(
     options: ConnectOptions | string,
@@ -17,43 +29,46 @@ export class MongoClient {
       const parsedOptions = typeof options === "string"
         ? await parse(options)
         : options;
+
+      this.#defaultDbName = parsedOptions.db;
       const cluster = new Cluster(parsedOptions);
       await cluster.connect();
       await cluster.authenticate();
       await cluster.updateMaster();
+
       this.#cluster = cluster;
+      this.#buildInfo = await this.runCommand(this.#defaultDbName, {
+        buildInfo: 1,
+      });
     } catch (e) {
-      throw new MongoError(`Connection failed: ${e.message || e}`);
+      throw new MongoDriverError(`Connection failed: ${e.message || e}`);
     }
     return this.database((options as ConnectOptions).db);
   }
 
-  async listDatabases(options?: {
+  async listDatabases(options: {
     filter?: Document;
     nameOnly?: boolean;
     authorizedCollections?: boolean;
     comment?: Document;
-  }): Promise<ListDatabaseInfo[]> {
-    if (!options) {
-      options = {};
-    }
-    assert(this.#cluster);
-    const { databases } = await this.#cluster.protocol.commandSingle("admin", {
-      listDatabases: 1,
-      ...options,
-    });
+  } = {}): Promise<ListDatabaseInfo[]> {
+    const { databases } = await this.getCluster().protocol.commandSingle(
+      "admin",
+      {
+        listDatabases: 1,
+        ...options,
+      },
+    );
     return databases;
   }
 
-  // TODO: add test cases
-  async runCommand<T = any>(db: string, body: Document): Promise<T> {
-    assert(this.#cluster);
-    return await this.#cluster.protocol.commandSingle(db, body);
+  // deno-lint-ignore no-explicit-any
+  runCommand<T = any>(db: string, body: Document): Promise<T> {
+    return this.getCluster().protocol.commandSingle(db, body);
   }
 
-  database(name: string): Database {
-    assert(this.#cluster);
-    return new Database(this.#cluster, name);
+  database(name = this.#defaultDbName): Database {
+    return new Database(this.getCluster(), name);
   }
 
   close() {

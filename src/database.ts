@@ -1,7 +1,8 @@
 import { Collection } from "./collection/mod.ts";
 import { CommandCursor } from "./protocol/mod.ts";
-import { CreateUserOptions, Document } from "./types.ts";
+import { CreateCollectionOptions, CreateUserOptions } from "./types.ts";
 import { Cluster } from "./cluster.ts";
+import { Document } from "../deps.ts";
 
 interface ListCollectionsReponse {
   cursor: {
@@ -29,19 +30,16 @@ export class Database {
     this.#cluster = cluster;
   }
 
-  collection<T>(name: string): Collection<T> {
-    return new Collection(this.#cluster.protocol, this.name, name);
+  collection<T = Document>(name: string): Collection<T> {
+    return new Collection<T>(this.#cluster.protocol, this.name, name);
   }
 
-  listCollections(options?: {
+  listCollections(options: {
     filter?: Document;
     nameOnly?: boolean;
     authorizedCollections?: boolean;
     comment?: Document;
-  }): CommandCursor<ListCollectionsResult> {
-    if (!options) {
-      options = {};
-    }
+  } = {}): CommandCursor<ListCollectionsResult> {
     return new CommandCursor<ListCollectionsResult>(
       this.#cluster.protocol,
       async () => {
@@ -50,7 +48,6 @@ export class Database {
         >(this.name, {
           listCollections: 1,
           ...options,
-          batchSize: 1,
         });
         return {
           id: cursor.id,
@@ -61,11 +58,11 @@ export class Database {
     );
   }
 
-  async listCollectionNames(options?: {
+  async listCollectionNames(options: {
     filter?: Document;
     authorizedCollections?: boolean;
     comment?: Document;
-  }): Promise<string[]> {
+  } = {}): Promise<string[]> {
     const cursor = this.listCollections({
       ...options,
       nameOnly: true,
@@ -73,17 +70,34 @@ export class Database {
     });
     const names: string[] = [];
     for await (const item of cursor) {
-      names.push(item!.name);
+      names.push(item.name);
     }
     return names;
   }
 
-  async createUser(
+  /**
+   * `createCollection` executes a create command to create a new collection with the specified name and options.
+   *
+   * https://www.mongodb.com/docs/manual/reference/command/create/#mongodb-dbcommand-dbcmd.create
+   */
+  async createCollection<T>(
+    name: string,
+    options?: CreateCollectionOptions,
+  ): Promise<Collection<T>> {
+    await this.#cluster.protocol.commandSingle(
+      this.name,
+      { create: name, ...options },
+    );
+
+    return this.collection<T>(name);
+  }
+
+  createUser(
     username: string,
     password: string,
     options?: CreateUserOptions,
   ) {
-    await this.#cluster.protocol.commandSingle(this.name, {
+    return this.#cluster.protocol.commandSingle(this.name, {
       createUser: options?.username ?? username,
       pwd: options?.password ?? password,
       customData: options?.customData,
@@ -96,11 +110,11 @@ export class Database {
     });
   }
 
-  async dropUser(username: string, options?: {
+  dropUser(username: string, options: {
     writeConcern?: Document;
     comment?: Document;
-  }) {
-    await this.#cluster.protocol.commandSingle(this.name, {
+  } = {}) {
+    return this.#cluster.protocol.commandSingle(this.name, {
       dropUser: username,
       writeConcern: options?.writeConcern,
       comment: options?.comment,

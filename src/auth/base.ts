@@ -1,5 +1,6 @@
-import { ConnectOptions, Credential, Document } from "../types.ts";
+import { ConnectOptions, Credential } from "../types.ts";
 import { WireProtocol } from "../protocol/mod.ts";
+import { Document } from "../../deps.ts";
 
 export abstract class AuthPlugin {
   abstract prepare(
@@ -31,6 +32,6 @@ export class AuthContext {
     this.protocol = protocol;
     this.credentials = credentials;
     this.options = options;
-    this.nonce = window.crypto.getRandomValues(new Uint8Array(24));
+    this.nonce = globalThis.crypto.getRandomValues(new Uint8Array(24));
   }
 }
